@@ -31,16 +31,34 @@ On the target host, the script installs itself system-wide as:
 
 This project uses semantic versioning. The current release is stored in `VERSION`, and user-facing release notes live in `CHANGELOG.md`.
 
-## Usage
+## Quick Start
 
-Run the script directly:
+1. Use a fresh Debian or Ubuntu server whenever possible.
+2. Make sure your DNS name already points to the server.
+3. Make sure ports `80/tcp` and `443/tcp` are reachable from the public internet.
+4. Run the installer:
 
 ```bash
 sudo bash install-relays.sh
 ```
 
-After installation, it is available system-wide as:
+5. Follow the interactive prompts for:
+
+- hostname
+- Let's Encrypt email address
+- Moblin endpoint
+- OBS endpoint
+
+After the initial installation, the manager is available system-wide as:
 
 ```bash
 sudo moblin-obs-relay-manager
 ```
+
+## Known Risks
+
+- This script is intended primarily for fresh systems.
+- It can modify or replace existing nginx configuration, TLS setup, firewall rules, installed packages, and managed services.
+- Running it on a server that already hosts production workloads can break existing websites or other networked applications.
+- The firewall configuration is opinionated and intentionally restrictive.
+- The uninstall flow purges managed packages such as `nginx`, `certbot`, `git`, `golang-go`, `nftables`, and `python3-certbot-nginx`.
