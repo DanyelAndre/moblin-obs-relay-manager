@@ -5,6 +5,8 @@ IFS=$'\n\t'
 
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
+readonly SCRIPT_NAME="Moblin OBS Relay Manager"
+readonly SCRIPT_VERSION="1.0.0"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -59,6 +61,10 @@ clear_screen() {
   if [[ -t 1 ]] && command_exists clear; then
     clear
   fi
+}
+
+print_banner() {
+  printf '%s v%s\n\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
 }
 
 pause() {
@@ -915,6 +921,7 @@ management_menu() {
 
   while true; do
     clear_screen
+    print_banner
     printf 'Existing installation detected for %s\n\n' "${DOMAIN}"
     cat <<'EOF'
 1. View current configuration
@@ -967,7 +974,15 @@ EOF
 }
 
 main() {
+  case "${1:-}" in
+    --version|-v)
+      printf '%s v%s\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
+      return
+      ;;
+  esac
+
   clear_screen
+  print_banner
   require_root "$@"
   check_os
   install_self_copy
