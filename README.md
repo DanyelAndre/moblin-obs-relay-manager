@@ -7,6 +7,13 @@
 
 It does not replace the upstream repositories. It simplifies installing and operating them together behind one nginx and Let's Encrypt setup.
 
+## Upstream Projects
+
+This project is a convenience layer around these upstream repositories:
+
+- [moblin-remote-control-relay](https://github.com/eerimoq/moblin-remote-control-relay)
+- [obs-remote-control-relay](https://github.com/eerimoq/obs-remote-control-relay)
+
 The project currently consists of a single installer and management script:
 
 - `install-relays.sh`
