@@ -6,7 +6,7 @@ IFS=$'\n\t'
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -35,6 +35,8 @@ readonly -a MANAGED_PACKAGES=(
 
 DOMAIN=""
 CERTBOT_EMAIL=""
+INSTALL_MOBLIN="yes"
+INSTALL_OBS="yes"
 MOBLIN_ENDPOINT="${DEFAULT_MOBLIN_ENDPOINT}"
 OBS_ENDPOINT="${DEFAULT_OBS_ENDPOINT}"
 MOBLIN_PROXY_BASE="$(printf '%s' "${DEFAULT_MOBLIN_ENDPOINT%/}")"
@@ -55,6 +57,25 @@ fail() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_yes() {
+  [[ "$1" == "yes" ]]
+}
+
+prompt_yes_default() {
+  local prompt_text="$1"
+  local answer
+
+  read -r -p "${prompt_text} [Y/n]: " answer
+  case "${answer}" in
+    n|N|no|NO)
+      printf 'no'
+      ;;
+    *)
+      printf 'yes'
+      ;;
+  esac
 }
 
 clear_screen() {
@@ -316,12 +337,25 @@ strip_trailing_slash() {
 }
 
 validate_distinct_endpoints() {
-  [[ "${MOBLIN_ENDPOINT}" != "${OBS_ENDPOINT}" ]] || fail "The Moblin and OBS endpoints must be different."
+  if is_yes "${INSTALL_MOBLIN}" && is_yes "${INSTALL_OBS}"; then
+    [[ "${MOBLIN_ENDPOINT}" != "${OBS_ENDPOINT}" ]] || fail "The Moblin and OBS endpoints must be different."
+  fi
 }
 
 sync_proxy_bases() {
-  MOBLIN_PROXY_BASE="$(strip_trailing_slash "${MOBLIN_ENDPOINT}")"
-  OBS_PROXY_BASE="$(strip_trailing_slash "${OBS_ENDPOINT}")"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    MOBLIN_PROXY_BASE="$(strip_trailing_slash "${MOBLIN_ENDPOINT}")"
+  fi
+
+  if is_yes "${INSTALL_OBS}"; then
+    OBS_PROXY_BASE="$(strip_trailing_slash "${OBS_ENDPOINT}")"
+  fi
+}
+
+validate_selected_projects() {
+  if ! is_yes "${INSTALL_MOBLIN}" && ! is_yes "${INSTALL_OBS}"; then
+    fail "At least one upstream relay project must be selected for installation."
+  fi
 }
 
 certificate_files_exist() {
@@ -333,6 +367,8 @@ save_state() {
   cat >"${STATE_FILE}" <<EOF
 DOMAIN=$(printf '%q' "${DOMAIN}")
 CERTBOT_EMAIL=$(printf '%q' "${CERTBOT_EMAIL}")
+INSTALL_MOBLIN=$(printf '%q' "${INSTALL_MOBLIN}")
+INSTALL_OBS=$(printf '%q' "${INSTALL_OBS}")
 MOBLIN_ENDPOINT=$(printf '%q' "${MOBLIN_ENDPOINT}")
 OBS_ENDPOINT=$(printf '%q' "${OBS_ENDPOINT}")
 EOF
@@ -382,19 +418,32 @@ extract_certbot_email() {
 
 infer_current_configuration() {
   [[ -f "${NGINX_SITE_FILE}" ]] || fail "Cannot infer the current configuration because ${NGINX_SITE_FILE} is missing."
-  [[ -f "${MOBLIN_SERVICE_FILE}" ]] || fail "Cannot infer the current configuration because ${MOBLIN_SERVICE_FILE} is missing."
-  [[ -f "${OBS_SERVICE_FILE}" ]] || fail "Cannot infer the current configuration because ${OBS_SERVICE_FILE} is missing."
 
   DOMAIN="$(extract_domain_from_nginx)"
   [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from ${NGINX_SITE_FILE}."
 
-  MOBLIN_PROXY_BASE="$(extract_proxy_base_from_unit "${MOBLIN_SERVICE_FILE}")"
-  OBS_PROXY_BASE="$(extract_proxy_base_from_unit "${OBS_SERVICE_FILE}")"
-  [[ -n "${MOBLIN_PROXY_BASE}" ]] || fail "Could not determine the configured Moblin endpoint from ${MOBLIN_SERVICE_FILE}."
-  [[ -n "${OBS_PROXY_BASE}" ]] || fail "Could not determine the configured OBS endpoint from ${OBS_SERVICE_FILE}."
+  INSTALL_MOBLIN="no"
+  INSTALL_OBS="no"
 
-  MOBLIN_ENDPOINT="$(normalize_endpoint "${MOBLIN_PROXY_BASE}")"
-  OBS_ENDPOINT="$(normalize_endpoint "${OBS_PROXY_BASE}")"
+  if [[ -f "${MOBLIN_SERVICE_FILE}" ]]; then
+    INSTALL_MOBLIN="yes"
+    MOBLIN_PROXY_BASE="$(extract_proxy_base_from_unit "${MOBLIN_SERVICE_FILE}")"
+    [[ -n "${MOBLIN_PROXY_BASE}" ]] || fail "Could not determine the configured Moblin endpoint from ${MOBLIN_SERVICE_FILE}."
+    MOBLIN_ENDPOINT="$(normalize_endpoint "${MOBLIN_PROXY_BASE}")"
+  else
+    MOBLIN_ENDPOINT="${DEFAULT_MOBLIN_ENDPOINT}"
+  fi
+
+  if [[ -f "${OBS_SERVICE_FILE}" ]]; then
+    INSTALL_OBS="yes"
+    OBS_PROXY_BASE="$(extract_proxy_base_from_unit "${OBS_SERVICE_FILE}")"
+    [[ -n "${OBS_PROXY_BASE}" ]] || fail "Could not determine the configured OBS endpoint from ${OBS_SERVICE_FILE}."
+    OBS_ENDPOINT="$(normalize_endpoint "${OBS_PROXY_BASE}")"
+  else
+    OBS_ENDPOINT="${DEFAULT_OBS_ENDPOINT}"
+  fi
+
+  validate_selected_projects
   CERTBOT_EMAIL="$(extract_certbot_email "${DOMAIN}")"
   validate_distinct_endpoints
   sync_proxy_bases
@@ -406,8 +455,25 @@ load_state() {
     source "${STATE_FILE}"
     DOMAIN="${DOMAIN:-}"
     CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+    INSTALL_MOBLIN="${INSTALL_MOBLIN:-}"
+    INSTALL_OBS="${INSTALL_OBS:-}"
+    if [[ -z "${INSTALL_MOBLIN}" ]]; then
+      if [[ -f "${MOBLIN_SERVICE_FILE}" ]]; then
+        INSTALL_MOBLIN="yes"
+      else
+        INSTALL_MOBLIN="no"
+      fi
+    fi
+    if [[ -z "${INSTALL_OBS}" ]]; then
+      if [[ -f "${OBS_SERVICE_FILE}" ]]; then
+        INSTALL_OBS="yes"
+      else
+        INSTALL_OBS="no"
+      fi
+    fi
     MOBLIN_ENDPOINT="$(normalize_endpoint "${MOBLIN_ENDPOINT:-${DEFAULT_MOBLIN_ENDPOINT}}")"
     OBS_ENDPOINT="$(normalize_endpoint "${OBS_ENDPOINT:-${DEFAULT_OBS_ENDPOINT}}")"
+    validate_selected_projects
     validate_distinct_endpoints
     sync_proxy_bases
     return
@@ -430,11 +496,24 @@ collect_install_configuration() {
   local moblin_input
   local obs_input
 
-  read -r -p "The original Moblin endpoint is ${DEFAULT_MOBLIN_ENDPOINT}. Press Enter to keep it, or enter a custom endpoint: " moblin_input
-  read -r -p "The original OBS endpoint is ${DEFAULT_OBS_ENDPOINT}. Press Enter to keep it, or enter a custom endpoint: " obs_input
+  INSTALL_MOBLIN="$(prompt_yes_default 'Install moblin-remote-control-relay?')"
+  INSTALL_OBS="$(prompt_yes_default 'Install obs-remote-control-relay?')"
+  validate_selected_projects
 
-  MOBLIN_ENDPOINT="$(normalize_endpoint "${moblin_input:-${DEFAULT_MOBLIN_ENDPOINT}}")"
-  OBS_ENDPOINT="$(normalize_endpoint "${obs_input:-${DEFAULT_OBS_ENDPOINT}}")"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    read -r -p "The original Moblin endpoint is ${DEFAULT_MOBLIN_ENDPOINT}. Press Enter to keep it, or enter a custom endpoint: " moblin_input
+    MOBLIN_ENDPOINT="$(normalize_endpoint "${moblin_input:-${DEFAULT_MOBLIN_ENDPOINT}}")"
+  else
+    MOBLIN_ENDPOINT="${DEFAULT_MOBLIN_ENDPOINT}"
+  fi
+
+  if is_yes "${INSTALL_OBS}"; then
+    read -r -p "The original OBS endpoint is ${DEFAULT_OBS_ENDPOINT}. Press Enter to keep it, or enter a custom endpoint: " obs_input
+    OBS_ENDPOINT="$(normalize_endpoint "${obs_input:-${DEFAULT_OBS_ENDPOINT}}")"
+  else
+    OBS_ENDPOINT="${DEFAULT_OBS_ENDPOINT}"
+  fi
+
   validate_distinct_endpoints
   sync_proxy_bases
 }
@@ -527,21 +606,29 @@ EOF
 }
 
 write_systemd_units() {
-  write_systemd_unit \
-    "${MOBLIN_SERVICE_NAME}" \
-    "Moblin Remote Control Relay" \
-    "${MOBLIN_DIR}/backend" \
-    "${MOBLIN_SERVICE_NAME}" \
-    "${MOBLIN_PORT}" \
-    "${MOBLIN_PROXY_BASE}"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    write_systemd_unit \
+      "${MOBLIN_SERVICE_NAME}" \
+      "Moblin Remote Control Relay" \
+      "${MOBLIN_DIR}/backend" \
+      "${MOBLIN_SERVICE_NAME}" \
+      "${MOBLIN_PORT}" \
+      "${MOBLIN_PROXY_BASE}"
+  else
+    rm -f "${MOBLIN_SERVICE_FILE}"
+  fi
 
-  write_systemd_unit \
-    "${OBS_SERVICE_NAME}" \
-    "OBS Remote Control Relay" \
-    "${OBS_DIR}/backend" \
-    "${OBS_SERVICE_NAME}" \
-    "${OBS_PORT}" \
-    "${OBS_PROXY_BASE}"
+  if is_yes "${INSTALL_OBS}"; then
+    write_systemd_unit \
+      "${OBS_SERVICE_NAME}" \
+      "OBS Remote Control Relay" \
+      "${OBS_DIR}/backend" \
+      "${OBS_SERVICE_NAME}" \
+      "${OBS_PORT}" \
+      "${OBS_PROXY_BASE}"
+  else
+    rm -f "${OBS_SERVICE_FILE}"
+  fi
 }
 
 configure_nginx() {
@@ -576,6 +663,10 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+EOF
+
+    if is_yes "${INSTALL_MOBLIN}"; then
+      cat >>"${NGINX_SITE_FILE}" <<EOF
 
     location ${MOBLIN_ENDPOINT} {
         proxy_pass http://127.0.0.1:${MOBLIN_PORT}/;
@@ -588,6 +679,11 @@ server {
         proxy_send_timeout 7d;
         proxy_read_timeout 7d;
     }
+EOF
+    fi
+
+    if is_yes "${INSTALL_OBS}"; then
+      cat >>"${NGINX_SITE_FILE}" <<EOF
 
     location ${OBS_ENDPOINT} {
         proxy_pass http://127.0.0.1:${OBS_PORT}/;
@@ -600,6 +696,10 @@ server {
         proxy_send_timeout 7d;
         proxy_read_timeout 7d;
     }
+EOF
+    fi
+
+    cat >>"${NGINX_SITE_FILE}" <<EOF
 }
 EOF
   fi
@@ -687,24 +787,38 @@ request_certificate() {
 
 restart_managed_services() {
   systemctl daemon-reload
-  systemctl enable "${MOBLIN_SERVICE_NAME}.service" "${OBS_SERVICE_NAME}.service"
 
-  if systemctl is-active --quiet "${MOBLIN_SERVICE_NAME}.service"; then
-    systemctl restart "${MOBLIN_SERVICE_NAME}.service"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    systemctl enable "${MOBLIN_SERVICE_NAME}.service"
+    if systemctl is-active --quiet "${MOBLIN_SERVICE_NAME}.service"; then
+      systemctl restart "${MOBLIN_SERVICE_NAME}.service"
+    else
+      systemctl start "${MOBLIN_SERVICE_NAME}.service"
+    fi
   else
-    systemctl start "${MOBLIN_SERVICE_NAME}.service"
+    stop_and_disable_unit "${MOBLIN_SERVICE_NAME}.service"
   fi
 
-  if systemctl is-active --quiet "${OBS_SERVICE_NAME}.service"; then
-    systemctl restart "${OBS_SERVICE_NAME}.service"
+  if is_yes "${INSTALL_OBS}"; then
+    systemctl enable "${OBS_SERVICE_NAME}.service"
+    if systemctl is-active --quiet "${OBS_SERVICE_NAME}.service"; then
+      systemctl restart "${OBS_SERVICE_NAME}.service"
+    else
+      systemctl start "${OBS_SERVICE_NAME}.service"
+    fi
   else
-    systemctl start "${OBS_SERVICE_NAME}.service"
+    stop_and_disable_unit "${OBS_SERVICE_NAME}.service"
   fi
 }
 
 show_urls() {
-  printf 'Moblin: https://%s%s\n' "${DOMAIN}" "${MOBLIN_ENDPOINT}"
-  printf 'OBS:    https://%s%s\n' "${DOMAIN}" "${OBS_ENDPOINT}"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    printf 'Moblin: https://%s%s\n' "${DOMAIN}" "${MOBLIN_ENDPOINT}"
+  fi
+
+  if is_yes "${INSTALL_OBS}"; then
+    printf 'OBS:    https://%s%s\n' "${DOMAIN}" "${OBS_ENDPOINT}"
+  fi
 }
 
 apply_runtime_configuration() {
@@ -740,15 +854,21 @@ show_current_configuration() {
 
   printf '\nCurrent configuration\n'
   printf 'Hostname:        %s\n' "${DOMAIN}"
-  printf 'Moblin endpoint: %s\n' "${MOBLIN_ENDPOINT}"
-  printf 'OBS endpoint:    %s\n' "${OBS_ENDPOINT}"
+  printf 'Moblin installed: %s\n' "${INSTALL_MOBLIN}"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    printf 'Moblin endpoint:  %s\n' "${MOBLIN_ENDPOINT}"
+    printf 'Moblin service:   %s\n' "$(service_state "${MOBLIN_SERVICE_NAME}.service")"
+  fi
+  printf 'OBS installed:    %s\n' "${INSTALL_OBS}"
+  if is_yes "${INSTALL_OBS}"; then
+    printf 'OBS endpoint:     %s\n' "${OBS_ENDPOINT}"
+    printf 'OBS service:      %s\n' "$(service_state "${OBS_SERVICE_NAME}.service")"
+  fi
   if [[ -n "${CERTBOT_EMAIL}" ]]; then
     printf 'Certbot email:   %s\n' "${CERTBOT_EMAIL}"
   else
     printf 'Certbot email:   not stored\n'
   fi
-  printf 'Moblin service:  %s\n' "$(service_state "${MOBLIN_SERVICE_NAME}.service")"
-  printf 'OBS service:     %s\n' "$(service_state "${OBS_SERVICE_NAME}.service")"
   printf '\n'
   show_urls
   printf '\n'
@@ -800,6 +920,9 @@ change_endpoint() {
 
   case "${target}" in
     moblin)
+      if ! is_yes "${INSTALL_MOBLIN}"; then
+        fail "Moblin relay is not installed on this system."
+      fi
       original_endpoint="${MOBLIN_ENDPOINT}"
       read -r -p "The current Moblin endpoint is ${MOBLIN_ENDPOINT}. Press Enter to keep it, or enter a new endpoint: " endpoint_input
       MOBLIN_ENDPOINT="$(normalize_endpoint "${endpoint_input:-${MOBLIN_ENDPOINT}}")"
@@ -809,6 +932,9 @@ change_endpoint() {
       fi
       ;;
     obs)
+      if ! is_yes "${INSTALL_OBS}"; then
+        fail "OBS relay is not installed on this system."
+      fi
       original_endpoint="${OBS_ENDPOINT}"
       read -r -p "The current OBS endpoint is ${OBS_ENDPOINT}. Press Enter to keep it, or enter a new endpoint: " endpoint_input
       OBS_ENDPOINT="$(normalize_endpoint "${endpoint_input:-${OBS_ENDPOINT}}")"
@@ -897,11 +1023,16 @@ run_initial_installation() {
 
   mkdir -p "${INSTALL_ROOT}"
   ensure_service_user
-  clone_or_update_repo "${MOBLIN_REPO_URL}" "${MOBLIN_DIR}"
-  clone_or_update_repo "${OBS_REPO_URL}" "${OBS_DIR}"
 
-  build_backend "${MOBLIN_DIR}/backend" "${MOBLIN_SERVICE_NAME}"
-  build_backend "${OBS_DIR}/backend" "${OBS_SERVICE_NAME}"
+  if is_yes "${INSTALL_MOBLIN}"; then
+    clone_or_update_repo "${MOBLIN_REPO_URL}" "${MOBLIN_DIR}"
+    build_backend "${MOBLIN_DIR}/backend" "${MOBLIN_SERVICE_NAME}"
+  fi
+
+  if is_yes "${INSTALL_OBS}"; then
+    clone_or_update_repo "${OBS_REPO_URL}" "${OBS_DIR}"
+    build_backend "${OBS_DIR}/backend" "${OBS_SERVICE_NAME}"
+  fi
 
   chown -R root:root "${INSTALL_ROOT}"
   chmod -R a+rX "${INSTALL_ROOT}"

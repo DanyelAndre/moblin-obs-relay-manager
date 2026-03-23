@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Added a pre-install selection so users can install only `moblin-remote-control-relay`, only `obs-remote-control-relay`, or both.
+- Updated the installer, saved state, nginx configuration, and managed services to respect the selected upstream projects.
+- Updated the README to document the optional relay selection during installation.
+
 ## 1.0.0
 
 - Initial public release.

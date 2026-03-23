@@ -31,6 +31,7 @@ On the target host, the script installs itself system-wide as:
 - Nginx reverse proxy for both relay services
 - Let's Encrypt certificate issuance and renewal
 - IPv4 and IPv6 firewall rules via `nftables`
+- Optional installation of either upstream relay project or both together
 - Management mode for existing installations
 - Uninstall flow with optional self-removal
 
@@ -51,6 +52,7 @@ sudo bash install-relays.sh
 
 5. Follow the interactive prompts for:
 
+- which upstream relay projects should be installed
 - hostname
 - Let's Encrypt email address
 - Moblin endpoint
