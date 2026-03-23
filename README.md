@@ -44,10 +44,10 @@ This project uses semantic versioning. The current release is stored in `VERSION
 1. Use a fresh Debian or Ubuntu server whenever possible.
 2. Make sure your DNS name already points to the server.
 3. Make sure ports `80/tcp` and `443/tcp` are reachable from the public internet.
-4. Run the installer:
+4. Download and run the installer:
 
 ```bash
-sudo bash install-relays.sh
+curl -fsSL -o /tmp/install-relays.sh https://raw.githubusercontent.com/DanyelAndre/moblin-obs-relay-manager/main/install-relays.sh && sudo bash /tmp/install-relays.sh
 ```
 
 5. Follow the interactive prompts for:
