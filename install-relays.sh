@@ -6,7 +6,7 @@ IFS=$'\n\t'
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.1.1"
+readonly SCRIPT_VERSION="1.2.0"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -833,6 +833,34 @@ restart_managed_services() {
   fi
 }
 
+current_git_revision() {
+  local repo_dir="$1"
+
+  if [[ -d "${repo_dir}/.git" ]]; then
+    git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+    return
+  fi
+
+  printf 'missing'
+}
+
+update_project() {
+  local label="$1"
+  local repo_url="$2"
+  local repo_dir="$3"
+  local binary_name="$4"
+
+  local before_revision
+  local after_revision
+
+  before_revision="$(current_git_revision "${repo_dir}")"
+  clone_or_update_repo "${repo_url}" "${repo_dir}"
+  build_backend "${repo_dir}/backend" "${binary_name}"
+  after_revision="$(current_git_revision "${repo_dir}")"
+
+  printf '%s: %s -> %s\n' "${label}" "${before_revision}" "${after_revision}"
+}
+
 show_urls() {
   if is_yes "${INSTALL_MOBLIN}"; then
     printf 'Moblin: https://%s%s\n' "${DOMAIN}" "${MOBLIN_ENDPOINT}"
@@ -894,6 +922,28 @@ show_current_configuration() {
   printf '\n'
   show_urls
   printf '\n'
+}
+
+update_installed_projects() {
+  load_state
+  ensure_packages git golang-go
+
+  printf '\nUpdating installed relay projects\n'
+
+  if is_yes "${INSTALL_MOBLIN}"; then
+    update_project "Moblin" "${MOBLIN_REPO_URL}" "${MOBLIN_DIR}" "${MOBLIN_SERVICE_NAME}"
+  fi
+
+  if is_yes "${INSTALL_OBS}"; then
+    update_project "OBS" "${OBS_REPO_URL}" "${OBS_DIR}" "${OBS_SERVICE_NAME}"
+  fi
+
+  chown -R root:root "${INSTALL_ROOT}"
+  chmod -R a+rX "${INSTALL_ROOT}"
+  restart_managed_services
+
+  printf '\n'
+  log "Installed relay projects updated."
 }
 
 change_hostname() {
@@ -1080,9 +1130,10 @@ management_menu() {
 1. View current configuration
 2. Change hostname (and request a new certificate)
 3. Renew the certificate manually
-4. Change the Moblin endpoint
-5. Change the OBS endpoint
-6. Uninstall everything
+4. Update installed relay project(s)
+5. Change the Moblin endpoint
+6. Change the OBS endpoint
+7. Uninstall everything
 0. Exit
 
 EOF
@@ -1104,14 +1155,18 @@ EOF
         pause
         ;;
       4)
-        change_endpoint "moblin"
+        update_installed_projects
         pause
         ;;
       5)
-        change_endpoint "obs"
+        change_endpoint "moblin"
         pause
         ;;
       6)
+        change_endpoint "obs"
+        pause
+        ;;
+      7)
         uninstall_everything
         break
         ;;

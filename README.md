@@ -33,6 +33,7 @@ On the target host, the script installs itself system-wide as:
 - IPv4 and IPv6 firewall rules via `nftables`
 - Optional installation of either upstream relay project or both together
 - Management mode for existing installations
+- Update workflow for installed upstream relay projects
 - Uninstall flow with optional self-removal
 
 ## Versioning
@@ -63,6 +64,8 @@ After the initial installation, the manager is available system-wide as:
 ```bash
 sudo moblin-obs-relay-manager
 ```
+
+From the management menu, you can also update the installed upstream relay projects to their latest repository state.
 
 ## Known Risks
 

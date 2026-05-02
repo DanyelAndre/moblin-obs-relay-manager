@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- Added a management option to update installed upstream relay projects.
+- The manager can now pull the latest changes for installed relay repositories, rebuild the binaries, and restart the managed services.
+
 ## 1.1.1
 
 - Improved recovery of existing installations when the saved state file is missing.
