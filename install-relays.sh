@@ -6,7 +6,7 @@ IFS=$'\n\t'
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -375,13 +375,37 @@ EOF
 }
 
 extract_domain_from_nginx() {
-  awk '
-    $1 == "server_name" {
-      gsub(/;/, "", $2)
-      print $2
-      exit
-    }
-  ' "${NGINX_SITE_FILE}"
+  if [[ -f "${NGINX_SITE_FILE}" ]]; then
+    awk '
+      $1 == "server_name" {
+        gsub(/;/, "", $2)
+        print $2
+        exit
+      }
+    ' "${NGINX_SITE_FILE}"
+    return
+  fi
+
+  if [[ -f "${NGINX_SITE_LINK}" ]]; then
+    awk '
+      $1 == "server_name" {
+        gsub(/;/, "", $2)
+        print $2
+        exit
+      }
+    ' "${NGINX_SITE_LINK}"
+    return
+  fi
+
+  if command_exists nginx; then
+    nginx -T 2>/dev/null | awk '
+      $1 == "server_name" {
+        gsub(/;/, "", $2)
+        print $2
+        exit
+      }
+    '
+  fi
 }
 
 extract_proxy_base_from_unit() {
@@ -417,10 +441,8 @@ extract_certbot_email() {
 }
 
 infer_current_configuration() {
-  [[ -f "${NGINX_SITE_FILE}" ]] || fail "Cannot infer the current configuration because ${NGINX_SITE_FILE} is missing."
-
   DOMAIN="$(extract_domain_from_nginx)"
-  [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from ${NGINX_SITE_FILE}."
+  [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from nginx configuration."
 
   INSTALL_MOBLIN="no"
   INSTALL_OBS="no"
