@@ -67,6 +67,16 @@ sudo moblin-obs-relay-manager
 
 From the management menu, you can also update the installed upstream relay projects to their latest repository state.
 
+## Troubleshooting
+
+If the manager script or saved state file is missing, but the relay services are still running, you can bootstrap the manager again with:
+
+```bash
+curl -fsSL -o /tmp/install-relays.sh https://raw.githubusercontent.com/DanyelAndre/moblin-obs-relay-manager/main/install-relays.sh && sudo bash /tmp/install-relays.sh
+```
+
+The manager will try to recover the existing installation from the current systemd units and nginx configuration.
+
 ## Known Risks
 
 - This script is intended primarily for fresh systems.
