@@ -852,11 +852,20 @@ update_project() {
 
   local before_revision
   local after_revision
+  local was_missing="no"
 
   before_revision="$(current_git_revision "${repo_dir}")"
+  if [[ "${before_revision}" == "missing" ]]; then
+    was_missing="yes"
+  fi
   clone_or_update_repo "${repo_url}" "${repo_dir}"
   build_backend "${repo_dir}/backend" "${binary_name}"
   after_revision="$(current_git_revision "${repo_dir}")"
+
+  if [[ "${was_missing}" == "yes" ]]; then
+    printf '%s: repository was missing and has been freshly cloned at %s\n' "${label}" "${after_revision}"
+    return
+  fi
 
   printf '%s: %s -> %s\n' "${label}" "${before_revision}" "${after_revision}"
 }
