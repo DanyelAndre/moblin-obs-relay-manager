@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.2
+
+- Fixed the Cloudflare API token prompt so it no longer writes a malformed multi-line credentials file for Certbot.
+- Added basic trimming of pasted Cloudflare API tokens before writing the credentials file.
+
 ## 1.4.1
 
 - Added an auto-detected default LAN IPv4 to the LAN HTTPS setup and hostname-change prompts so the current server address can be accepted with Enter or overridden manually.

@@ -8,7 +8,7 @@ readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly DEFAULT_INSTALL_MODE="public"
 readonly CLOUDFLARE_CREDENTIALS_FILE="/root/.secrets/certbot/cloudflare.ini"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.4.1"
+readonly SCRIPT_VERSION="1.4.2"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -266,7 +266,10 @@ prompt_cloudflare_token() {
 
   while [[ -z "${token}" ]]; do
     read -r -s -p "Cloudflare API token with DNS edit rights: " token
-    printf '\n'
+    token="${token//$'\r'/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    printf '\n' >&2
   done
 
   printf '%s' "${token}"
