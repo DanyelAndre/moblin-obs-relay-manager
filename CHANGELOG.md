@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+
+- Replaced the experimental `private HTTP-only` mode with `LAN HTTPS` mode using a Cloudflare DNS challenge.
+- Added a guided Cloudflare DNS-only A record step for LAN deployments.
+- Added automated certificate issuance for LAN-only servers via `python3-certbot-dns-cloudflare`.
+- Updated nginx, firewall, saved state, recovery logic, and documentation to reflect the Cloudflare-based LAN HTTPS flow.
+
 ## 1.3.0
 
 - Added a choice between `public HTTPS` mode and `private HTTP-only` mode during initial installation.

@@ -6,8 +6,9 @@ IFS=$'\n\t'
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly DEFAULT_INSTALL_MODE="public"
+readonly CLOUDFLARE_CREDENTIALS_FILE="/root/.secrets/certbot/cloudflare.ini"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -27,6 +28,7 @@ readonly STATE_FILE="/etc/remote-control-relays.conf"
 readonly SELF_INSTALL_PATH="/usr/local/sbin/moblin-obs-relay-manager"
 readonly -a MANAGED_PACKAGES=(
   certbot
+  python3-certbot-dns-cloudflare
   git
   golang-go
   nginx
@@ -36,6 +38,8 @@ readonly -a MANAGED_PACKAGES=(
 
 DOMAIN=""
 CERTBOT_EMAIL=""
+CERTBOT_DNS_PROVIDER=""
+CLOUDFLARE_API_TOKEN=""
 INSTALL_MODE="${DEFAULT_INSTALL_MODE}"
 INSTALL_MOBLIN="yes"
 INSTALL_OBS="yes"
@@ -71,6 +75,10 @@ is_public_mode() {
 
 is_private_mode() {
   [[ "${INSTALL_MODE}" == "private" ]]
+}
+
+uses_cloudflare_dns() {
+  [[ "${CERTBOT_DNS_PROVIDER}" == "cloudflare" ]]
 }
 
 validate_install_mode() {
@@ -199,10 +207,11 @@ EOF
 Before installation, the following requirements must already be met:
 
 1. This server is reachable from the private network where the relay users will connect.
-2. Port 80/tcp is reachable from that network.
-3. The firewall will later allow new incoming connections only on ports 22/tcp and 80/tcp.
-4. No DNS name or TLS certificate will be configured in this mode.
-5. SSH remains reachable on port 22/tcp after the installation.
+2. Port 443/tcp is reachable from that network.
+3. You control the public DNS zone for the chosen hostname in Cloudflare DNS.
+4. You accept that the chosen hostname will be publicly resolvable, even though it will point to a private LAN IPv4 address.
+5. The firewall will later allow new incoming connections only on ports 22/tcp and 443/tcp.
+6. SSH remains reachable on port 22/tcp after the installation.
 
 EOF
   fi
@@ -229,9 +238,9 @@ Select the installation mode:
    Requires a DNS name and Let's Encrypt certificate.
    Intended for installations reachable from the public internet.
 
-2. Private HTTP-only mode
-   Does not require a DNS name or TLS certificate.
-   Intended for installations on a private or otherwise non-publicly reachable server.
+2. LAN HTTPS mode (Cloudflare DNS challenge)
+   Requires a DNS name and a Cloudflare-managed DNS zone.
+   Intended for installations reachable only inside a LAN or other private network.
 
 EOF
 
@@ -250,6 +259,38 @@ EOF
         ;;
     esac
   done
+}
+
+prompt_cloudflare_token() {
+  local token=""
+
+  while [[ -z "${token}" ]]; do
+    read -r -s -p "Cloudflare API token with DNS edit rights: " token
+    printf '\n'
+  done
+
+  printf '%s' "${token}"
+}
+
+print_private_dns_next_steps() {
+  local lan_ipv4="$1"
+
+  cat <<EOF
+
+Next DNS step:
+
+Create a Cloudflare DNS-only A record for:
+  ${DOMAIN} -> ${lan_ipv4}
+
+Important:
+- Use record type A.
+- Use DNS only (gray cloud), not proxied.
+- The hostname will be publicly resolvable, but it will point to a private LAN IPv4 address.
+- LAN clients must be able to reach ${lan_ipv4} on port 443/tcp.
+
+After that, this installer will request the certificate via the Cloudflare DNS challenge.
+
+EOF
 }
 
 confirm_uninstall() {
@@ -451,6 +492,7 @@ save_state() {
 INSTALL_MODE=$(printf '%q' "${INSTALL_MODE}")
 DOMAIN=$(printf '%q' "${DOMAIN}")
 CERTBOT_EMAIL=$(printf '%q' "${CERTBOT_EMAIL}")
+CERTBOT_DNS_PROVIDER=$(printf '%q' "${CERTBOT_DNS_PROVIDER}")
 INSTALL_MOBLIN=$(printf '%q' "${INSTALL_MOBLIN}")
 INSTALL_OBS=$(printf '%q' "${INSTALL_OBS}")
 MOBLIN_ENDPOINT=$(printf '%q' "${MOBLIN_ENDPOINT}")
@@ -530,10 +572,16 @@ infer_current_configuration() {
     DOMAIN="$(extract_domain_from_nginx)"
     [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from nginx configuration."
     CERTBOT_EMAIL="$(extract_certbot_email "${DOMAIN}")"
+    CERTBOT_DNS_PROVIDER=""
+    if [[ -f "${CLOUDFLARE_CREDENTIALS_FILE}" ]]; then
+      INSTALL_MODE="private"
+      CERTBOT_DNS_PROVIDER="cloudflare"
+    fi
   else
     INSTALL_MODE="private"
     DOMAIN=""
     CERTBOT_EMAIL=""
+    CERTBOT_DNS_PROVIDER=""
   fi
 
   INSTALL_MOBLIN="no"
@@ -570,6 +618,7 @@ load_state() {
     INSTALL_MODE="${INSTALL_MODE:-}"
     DOMAIN="${DOMAIN:-}"
     CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+    CERTBOT_DNS_PROVIDER="${CERTBOT_DNS_PROVIDER:-}"
     INSTALL_MOBLIN="${INSTALL_MOBLIN:-}"
     INSTALL_OBS="${INSTALL_OBS:-}"
     if [[ -z "${INSTALL_MODE}" ]]; then
@@ -595,10 +644,13 @@ load_state() {
         INSTALL_OBS="no"
       fi
     fi
+    if [[ "${INSTALL_MODE}" == "public" && -f "${CLOUDFLARE_CREDENTIALS_FILE}" ]]; then
+      INSTALL_MODE="private"
+      CERTBOT_DNS_PROVIDER="cloudflare"
+    fi
     validate_install_mode
-    if is_private_mode; then
-      DOMAIN=""
-      CERTBOT_EMAIL=""
+    if is_private_mode && [[ -z "${CERTBOT_DNS_PROVIDER}" ]]; then
+      CERTBOT_DNS_PROVIDER="cloudflare"
     fi
     MOBLIN_ENDPOINT="$(normalize_endpoint "${MOBLIN_ENDPOINT:-${DEFAULT_MOBLIN_ENDPOINT}}")"
     OBS_ENDPOINT="$(normalize_endpoint "${OBS_ENDPOINT:-${DEFAULT_OBS_ENDPOINT}}")"
@@ -620,18 +672,25 @@ existing_installation_detected() {
 collect_install_configuration() {
   local moblin_input
   local obs_input
+  local lan_ipv4=""
 
   INSTALL_MOBLIN="$(prompt_yes_default 'Install moblin-remote-control-relay?')"
   INSTALL_OBS="$(prompt_yes_default 'Install obs-remote-control-relay?')"
   validate_selected_projects
 
-  if is_public_mode; then
-    DOMAIN="$(prompt_required 'DNS name (for example relay.example.com): ')"
-    CERTBOT_EMAIL=""
-    read -r -p "Email address for Let's Encrypt (leave empty to register without email): " CERTBOT_EMAIL
+  DOMAIN="$(prompt_required 'DNS name (for example relay.example.com): ')"
+  CERTBOT_EMAIL=""
+  read -r -p "Email address for Let's Encrypt (leave empty to register without email): " CERTBOT_EMAIL
+
+  if is_private_mode; then
+    CERTBOT_DNS_PROVIDER="cloudflare"
+    lan_ipv4="$(prompt_required 'LAN IPv4 address for the chosen hostname (for example 192.168.1.50): ')"
+    print_private_dns_next_steps "${lan_ipv4}"
+    read -r -p "Press Enter after the DNS-only A record has been created."
+    CLOUDFLARE_API_TOKEN="$(prompt_cloudflare_token)"
   else
-    DOMAIN=""
-    CERTBOT_EMAIL=""
+    CERTBOT_DNS_PROVIDER=""
+    CLOUDFLARE_API_TOKEN=""
   fi
 
   if is_yes "${INSTALL_MOBLIN}"; then
@@ -655,24 +714,50 @@ collect_install_configuration() {
 
 install_dependencies() {
   ensure_commands "curl:curl" "sudo:sudo"
-  if is_public_mode; then
-    ensure_packages \
-      ca-certificates \
-      git \
-      golang-go \
-      nginx \
-      certbot \
-      python3-certbot-nginx \
-      nftables
-    return
-  fi
-
   ensure_packages \
     ca-certificates \
+    certbot \
     git \
     golang-go \
     nginx \
     nftables
+
+  if is_public_mode; then
+    ensure_packages python3-certbot-nginx
+    return
+  fi
+
+  ensure_packages python3-certbot-dns-cloudflare
+}
+
+write_cloudflare_credentials() {
+  if ! is_private_mode; then
+    return
+  fi
+
+  uses_cloudflare_dns || fail "Unsupported DNS provider for private mode: ${CERTBOT_DNS_PROVIDER}"
+  [[ -n "${CLOUDFLARE_API_TOKEN}" ]] || fail "The Cloudflare API token is missing."
+
+  mkdir -p "$(dirname "${CLOUDFLARE_CREDENTIALS_FILE}")"
+  umask 077
+  cat >"${CLOUDFLARE_CREDENTIALS_FILE}" <<EOF
+dns_cloudflare_api_token = ${CLOUDFLARE_API_TOKEN}
+EOF
+  chmod 600 "${CLOUDFLARE_CREDENTIALS_FILE}"
+}
+
+load_cloudflare_token_from_credentials() {
+  if [[ ! -f "${CLOUDFLARE_CREDENTIALS_FILE}" ]]; then
+    return
+  fi
+
+  awk -F'=' '
+    $1 ~ /^[[:space:]]*dns_cloudflare_api_token[[:space:]]*$/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "${CLOUDFLARE_CREDENTIALS_FILE}"
 }
 
 ensure_service_user() {
@@ -779,55 +864,7 @@ write_systemd_units() {
 configure_nginx() {
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 
-  if is_private_mode; then
-    cat >"${NGINX_SITE_FILE}" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name _;
-    root /var/www/html;
-    index index.nginx-debian.html index.html;
-EOF
-
-    if is_yes "${INSTALL_MOBLIN}"; then
-      cat >>"${NGINX_SITE_FILE}" <<EOF
-
-    location ${MOBLIN_ENDPOINT} {
-        proxy_pass http://127.0.0.1:${MOBLIN_PORT}/;
-        proxy_http_version 1.1;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host \$host;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-EOF
-    fi
-
-    if is_yes "${INSTALL_OBS}"; then
-      cat >>"${NGINX_SITE_FILE}" <<EOF
-
-    location ${OBS_ENDPOINT} {
-        proxy_pass http://127.0.0.1:${OBS_PORT}/;
-        proxy_http_version 1.1;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host \$host;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-EOF
-    fi
-
-    cat >>"${NGINX_SITE_FILE}" <<EOF
-}
-EOF
-  else
-    cat >"${NGINX_SITE_FILE}" <<EOF
+  cat >"${NGINX_SITE_FILE}" <<EOF
 server {
     listen 80;
     listen [::]:80;
@@ -844,8 +881,8 @@ server {
 }
 EOF
 
-    if certificate_files_exist; then
-      cat >>"${NGINX_SITE_FILE}" <<EOF
+  if certificate_files_exist; then
+    cat >>"${NGINX_SITE_FILE}" <<EOF
 
 server {
     listen 443 ssl;
@@ -895,7 +932,6 @@ EOF
     cat >>"${NGINX_SITE_FILE}" <<EOF
 }
 EOF
-    fi
   fi
 
   ln -sfn "${NGINX_SITE_FILE}" "${NGINX_SITE_LINK}"
@@ -913,7 +949,7 @@ configure_firewall() {
   local allowed_ports="22, 80, 443"
 
   if is_private_mode; then
-    allowed_ports="22, 80"
+    allowed_ports="22, 443"
   fi
 
   cat >/etc/nftables.conf <<'EOF'
@@ -961,21 +997,21 @@ EOF
 }
 
 request_certificate() {
-  if is_private_mode; then
-    return
-  fi
+  local certbot_args=(certbot certonly --non-interactive --agree-tos --cert-name "${DOMAIN}" -d "${DOMAIN}")
 
-  local certbot_args=(
-    certbot
-    certonly
-    --webroot
-    -w
-    /var/www/html
-    --non-interactive
-    --agree-tos
-    --cert-name "${DOMAIN}"
-    -d "${DOMAIN}"
-  )
+  if is_public_mode; then
+    certbot_args+=(--webroot -w /var/www/html)
+  else
+    if [[ -z "${CLOUDFLARE_API_TOKEN}" ]]; then
+      CLOUDFLARE_API_TOKEN="$(load_cloudflare_token_from_credentials)"
+    fi
+    write_cloudflare_credentials
+    certbot_args+=(
+      --dns-cloudflare
+      --dns-cloudflare-credentials "${CLOUDFLARE_CREDENTIALS_FILE}"
+      --dns-cloudflare-propagation-seconds 30
+    )
+  fi
 
   if [[ -n "${CERTBOT_EMAIL}" ]]; then
     certbot_args+=(-m "${CERTBOT_EMAIL}")
@@ -1079,32 +1115,18 @@ install_mode_label() {
     return
   fi
 
-  printf 'private HTTP-only'
+  printf 'LAN HTTPS (Cloudflare DNS challenge)'
 }
 
 show_urls() {
-  local base_host
-
-  if is_public_mode; then
-    base_host="${DOMAIN}"
-  else
-    base_host="$(detect_access_host)"
-  fi
+  local base_host="${DOMAIN}"
 
   if is_yes "${INSTALL_MOBLIN}"; then
-    if is_public_mode; then
-      printf 'Moblin: https://%s%s\n' "${base_host}" "${MOBLIN_ENDPOINT}"
-    else
-      printf 'Moblin: http://%s%s\n' "${base_host}" "${MOBLIN_ENDPOINT}"
-    fi
+    printf 'Moblin: https://%s%s\n' "${base_host}" "${MOBLIN_ENDPOINT}"
   fi
 
   if is_yes "${INSTALL_OBS}"; then
-    if is_public_mode; then
-      printf 'OBS:    https://%s%s\n' "${base_host}" "${OBS_ENDPOINT}"
-    else
-      printf 'OBS:    http://%s%s\n' "${base_host}" "${OBS_ENDPOINT}"
-    fi
+    printf 'OBS:    https://%s%s\n' "${base_host}" "${OBS_ENDPOINT}"
   fi
 }
 
@@ -1141,11 +1163,7 @@ show_current_configuration() {
 
   printf '\nCurrent configuration\n'
   printf 'Install mode:     %s\n' "$(install_mode_label)"
-  if is_public_mode; then
-    printf 'Hostname:         %s\n' "${DOMAIN}"
-  else
-    printf 'Access host:      %s\n' "$(detect_access_host)"
-  fi
+  printf 'Hostname:         %s\n' "${DOMAIN}"
   printf 'Moblin installed: %s\n' "${INSTALL_MOBLIN}"
   if is_yes "${INSTALL_MOBLIN}"; then
     printf 'Moblin endpoint:  %s\n' "${MOBLIN_ENDPOINT}"
@@ -1156,12 +1174,13 @@ show_current_configuration() {
     printf 'OBS endpoint:     %s\n' "${OBS_ENDPOINT}"
     printf 'OBS service:      %s\n' "$(service_state "${OBS_SERVICE_NAME}.service")"
   fi
-  if is_public_mode; then
-    if [[ -n "${CERTBOT_EMAIL}" ]]; then
-      printf 'Certbot email:    %s\n' "${CERTBOT_EMAIL}"
-    else
-      printf 'Certbot email:    not stored\n'
-    fi
+  if [[ -n "${CERTBOT_EMAIL}" ]]; then
+    printf 'Certbot email:    %s\n' "${CERTBOT_EMAIL}"
+  else
+    printf 'Certbot email:    not stored\n'
+  fi
+  if is_private_mode; then
+    printf 'DNS provider:     %s\n' "${CERTBOT_DNS_PROVIDER}"
   fi
   printf '\n'
   show_urls
@@ -1193,12 +1212,10 @@ update_installed_projects() {
 change_hostname() {
   load_state
 
-  if is_private_mode; then
-    fail "Hostname changes are only available in public HTTPS mode."
-  fi
-
   local domain_input
   local email_input
+  local lan_ipv4=""
+  local replacement_token=""
   local original_domain="${DOMAIN}"
   local original_email="${CERTBOT_EMAIL}"
 
@@ -1215,6 +1232,24 @@ change_hostname() {
     return
   fi
 
+  if is_private_mode; then
+    CERTBOT_DNS_PROVIDER="cloudflare"
+    lan_ipv4="$(prompt_required 'LAN IPv4 address for the updated hostname (for example 192.168.1.50): ')"
+    print_private_dns_next_steps "${lan_ipv4}"
+    read -r -p "Press Enter after the DNS-only A record has been updated."
+
+    CLOUDFLARE_API_TOKEN="$(load_cloudflare_token_from_credentials)"
+    if [[ -n "${CLOUDFLARE_API_TOKEN}" ]]; then
+      read -r -s -p "Press Enter to keep the current Cloudflare API token, or enter a new one: " replacement_token
+      printf '\n'
+      if [[ -n "${replacement_token}" ]]; then
+        CLOUDFLARE_API_TOKEN="${replacement_token}"
+      fi
+    else
+      CLOUDFLARE_API_TOKEN="$(prompt_cloudflare_token)"
+    fi
+  fi
+
   apply_runtime_configuration "yes"
   log "Hostname configuration updated."
   show_urls
@@ -1223,8 +1258,10 @@ change_hostname() {
 renew_certificate_manually() {
   load_state
 
-  if is_private_mode; then
-    fail "Certificate renewal is only available in public HTTPS mode."
+  if is_private_mode && [[ ! -f "${CLOUDFLARE_CREDENTIALS_FILE}" ]]; then
+    CERTBOT_DNS_PROVIDER="cloudflare"
+    CLOUDFLARE_API_TOKEN="$(prompt_cloudflare_token)"
+    write_cloudflare_credentials
   fi
 
   log "Renewing certificates manually."
@@ -1308,6 +1345,7 @@ uninstall_everything() {
   fi
 
   rm -f "${NGINX_SITE_LINK}" "${NGINX_SITE_FILE}" "${STATE_FILE}"
+  rm -f "${CLOUDFLARE_CREDENTIALS_FILE}"
   rm -rf "${INSTALL_ROOT}"
 
   if id -u "${RELAY_USER}" >/dev/null 2>&1; then
@@ -1380,9 +1418,13 @@ management_menu() {
   while true; do
     clear_screen
     print_banner
-    if is_public_mode; then
+    if [[ -n "${DOMAIN}" ]]; then
       printf 'Existing installation detected for %s (%s)\n\n' "${DOMAIN}" "$(install_mode_label)"
-      cat <<'EOF'
+    else
+      printf 'Existing installation detected (%s)\n\n' "$(install_mode_label)"
+    fi
+
+    cat <<'EOF'
 1. View current configuration
 2. Change hostname (and request a new certificate)
 3. Renew the certificate manually
@@ -1393,62 +1435,8 @@ management_menu() {
 0. Exit
 
 EOF
-    else
-      printf 'Existing installation detected (%s)\n\n' "$(install_mode_label)"
-      cat <<'EOF'
-1. View current configuration
-2. Update installed relay project(s)
-3. Change the Moblin endpoint
-4. Change the OBS endpoint
-5. Uninstall everything
-0. Exit
-
-EOF
-    fi
 
     read -r -p "Select an option: " selection
-
-    if is_public_mode; then
-      case "${selection}" in
-        1)
-          clear_screen
-          show_current_configuration
-          pause
-          ;;
-        2)
-          change_hostname
-          pause
-          ;;
-        3)
-          renew_certificate_manually
-          pause
-          ;;
-        4)
-          update_installed_projects
-          pause
-          ;;
-        5)
-          change_endpoint "moblin"
-          pause
-          ;;
-        6)
-          change_endpoint "obs"
-          pause
-          ;;
-        7)
-          uninstall_everything
-          break
-          ;;
-        0|"")
-          break
-          ;;
-        *)
-          warn "Invalid selection."
-          pause
-          ;;
-      esac
-      continue
-    fi
 
     case "${selection}" in
       1)
@@ -1457,18 +1445,26 @@ EOF
         pause
         ;;
       2)
-        update_installed_projects
+        change_hostname
         pause
         ;;
       3)
-        change_endpoint "moblin"
+        renew_certificate_manually
         pause
         ;;
       4)
-        change_endpoint "obs"
+        update_installed_projects
         pause
         ;;
       5)
+        change_endpoint "moblin"
+        pause
+        ;;
+      6)
+        change_endpoint "obs"
+        pause
+        ;;
+      7)
         uninstall_everything
         break
         ;;
