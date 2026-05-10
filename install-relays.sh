@@ -8,7 +8,7 @@ readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
 readonly DEFAULT_INSTALL_MODE="public"
 readonly CLOUDFLARE_CREDENTIALS_FILE="/root/.secrets/certbot/cloudflare.ini"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.4.1"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -411,6 +411,39 @@ prompt_required() {
   printf '%s' "${value}"
 }
 
+detect_lan_ipv4() {
+  local ip_address=""
+
+  if command_exists ip; then
+    ip_address="$(ip -4 route get 1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
+  fi
+
+  if [[ -z "${ip_address}" ]]; then
+    ip_address="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  printf '%s' "${ip_address}"
+}
+
+prompt_lan_ipv4() {
+  local prompt_text="$1"
+  local default_value=""
+  local value=""
+
+  default_value="$(detect_lan_ipv4)"
+
+  while [[ -z "${value}" ]]; do
+    if [[ -n "${default_value}" ]]; then
+      read -r -p "${prompt_text} [${default_value}]: " value
+      value="${value:-${default_value}}"
+    else
+      read -r -p "${prompt_text}: " value
+    fi
+  done
+
+  printf '%s' "${value}"
+}
+
 normalize_endpoint() {
   local value="$1"
 
@@ -684,7 +717,7 @@ collect_install_configuration() {
 
   if is_private_mode; then
     CERTBOT_DNS_PROVIDER="cloudflare"
-    lan_ipv4="$(prompt_required 'LAN IPv4 address for the chosen hostname (for example 192.168.1.50): ')"
+    lan_ipv4="$(prompt_lan_ipv4 'LAN IPv4 address for the chosen hostname (for example 192.168.1.50)')"
     print_private_dns_next_steps "${lan_ipv4}"
     read -r -p "Press Enter after the DNS-only A record has been created."
     CLOUDFLARE_API_TOKEN="$(prompt_cloudflare_token)"
@@ -1093,13 +1126,7 @@ update_project() {
 detect_access_host() {
   local ip_address=""
 
-  if command_exists ip; then
-    ip_address="$(ip -4 route get 1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
-  fi
-
-  if [[ -z "${ip_address}" ]]; then
-    ip_address="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
+  ip_address="$(detect_lan_ipv4)"
 
   if [[ -n "${ip_address}" ]]; then
     printf '%s' "${ip_address}"
@@ -1234,7 +1261,7 @@ change_hostname() {
 
   if is_private_mode; then
     CERTBOT_DNS_PROVIDER="cloudflare"
-    lan_ipv4="$(prompt_required 'LAN IPv4 address for the updated hostname (for example 192.168.1.50): ')"
+    lan_ipv4="$(prompt_lan_ipv4 'LAN IPv4 address for the updated hostname (for example 192.168.1.50)')"
     print_private_dns_next_steps "${lan_ipv4}"
     read -r -p "Press Enter after the DNS-only A record has been updated."
 

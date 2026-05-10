@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Added an auto-detected default LAN IPv4 to the LAN HTTPS setup and hostname-change prompts so the current server address can be accepted with Enter or overridden manually.
+
 ## 1.4.0
 
 - Replaced the experimental `private HTTP-only` mode with `LAN HTTPS` mode using a Cloudflare DNS challenge.

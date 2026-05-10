@@ -61,6 +61,7 @@ curl -fsSL -o /tmp/install-relays.sh https://raw.githubusercontent.com/DanyelAnd
 - which upstream relay projects should be installed
 - hostname and Let's Encrypt email address
 - Cloudflare DNS setup and API token in `LAN HTTPS mode`
+- the current server LAN IPv4 as the default value for the LAN DNS record step
 - Moblin endpoint
 - OBS endpoint
 
