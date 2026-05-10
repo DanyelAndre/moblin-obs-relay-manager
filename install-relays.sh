@@ -5,8 +5,9 @@ IFS=$'\n\t'
 
 readonly DEFAULT_MOBLIN_ENDPOINT="/moblin-remote-control-relay/"
 readonly DEFAULT_OBS_ENDPOINT="/obs-remote-control-relay/"
+readonly DEFAULT_INSTALL_MODE="public"
 readonly SCRIPT_NAME="Moblin OBS Relay Manager"
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.3.0"
 readonly RELAY_USER="obsrelay"
 readonly INSTALL_ROOT="/opt/remote-control-relays"
 readonly MOBLIN_REPO_URL="https://github.com/eerimoq/moblin-remote-control-relay.git"
@@ -35,6 +36,7 @@ readonly -a MANAGED_PACKAGES=(
 
 DOMAIN=""
 CERTBOT_EMAIL=""
+INSTALL_MODE="${DEFAULT_INSTALL_MODE}"
 INSTALL_MOBLIN="yes"
 INSTALL_OBS="yes"
 MOBLIN_ENDPOINT="${DEFAULT_MOBLIN_ENDPOINT}"
@@ -61,6 +63,24 @@ command_exists() {
 
 is_yes() {
   [[ "$1" == "yes" ]]
+}
+
+is_public_mode() {
+  [[ "${INSTALL_MODE}" == "public" ]]
+}
+
+is_private_mode() {
+  [[ "${INSTALL_MODE}" == "private" ]]
+}
+
+validate_install_mode() {
+  case "${INSTALL_MODE}" in
+    public|private)
+      ;;
+    *)
+      fail "Unsupported installation mode: ${INSTALL_MODE}"
+      ;;
+  esac
 }
 
 prompt_yes_default() {
@@ -163,7 +183,8 @@ EOF
 }
 
 confirm_prerequisites() {
-  cat <<'EOF'
+  if is_public_mode; then
+    cat <<'EOF'
 Before installation, the following requirements must already be met:
 
 1. The DNS name for this installation already points to this server.
@@ -173,6 +194,18 @@ Before installation, the following requirements must already be met:
 5. SSH remains reachable on port 22/tcp after the installation.
 
 EOF
+  else
+    cat <<'EOF'
+Before installation, the following requirements must already be met:
+
+1. This server is reachable from the private network where the relay users will connect.
+2. Port 80/tcp is reachable from that network.
+3. The firewall will later allow new incoming connections only on ports 22/tcp and 80/tcp.
+4. No DNS name or TLS certificate will be configured in this mode.
+5. SSH remains reachable on port 22/tcp after the installation.
+
+EOF
+  fi
 
   local answer
   read -r -p "Are these requirements satisfied, and should the installation continue? [y/N]: " answer
@@ -183,6 +216,40 @@ EOF
       fail "Installation aborted."
       ;;
   esac
+}
+
+select_install_mode() {
+  local selection=""
+
+  while true; do
+    cat <<'EOF'
+Select the installation mode:
+
+1. Public HTTPS mode
+   Requires a DNS name and Let's Encrypt certificate.
+   Intended for installations reachable from the public internet.
+
+2. Private HTTP-only mode
+   Does not require a DNS name or TLS certificate.
+   Intended for installations on a private or otherwise non-publicly reachable server.
+
+EOF
+
+    read -r -p "Choose the installation mode [1/2] (default: 1): " selection
+    case "${selection}" in
+      ""|1)
+        INSTALL_MODE="public"
+        return
+        ;;
+      2)
+        INSTALL_MODE="private"
+        return
+        ;;
+      *)
+        warn "Invalid selection."
+        ;;
+    esac
+  done
 }
 
 confirm_uninstall() {
@@ -362,9 +429,26 @@ certificate_files_exist() {
   [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]] && [[ -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]
 }
 
+nginx_configuration_uses_tls() {
+  if [[ -f "${NGINX_SITE_FILE}" ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?443 ssl;|^[[:space:]]*ssl_certificate[[:space:]]+' "${NGINX_SITE_FILE}"; then
+    return 0
+  fi
+
+  if [[ -f "${NGINX_SITE_LINK}" ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?443 ssl;|^[[:space:]]*ssl_certificate[[:space:]]+' "${NGINX_SITE_LINK}"; then
+    return 0
+  fi
+
+  if command_exists nginx && nginx -T 2>/dev/null | grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?443 ssl;|^[[:space:]]*ssl_certificate[[:space:]]+'; then
+    return 0
+  fi
+
+  return 1
+}
+
 save_state() {
   umask 077
   cat >"${STATE_FILE}" <<EOF
+INSTALL_MODE=$(printf '%q' "${INSTALL_MODE}")
 DOMAIN=$(printf '%q' "${DOMAIN}")
 CERTBOT_EMAIL=$(printf '%q' "${CERTBOT_EMAIL}")
 INSTALL_MOBLIN=$(printf '%q' "${INSTALL_MOBLIN}")
@@ -441,8 +525,16 @@ extract_certbot_email() {
 }
 
 infer_current_configuration() {
-  DOMAIN="$(extract_domain_from_nginx)"
-  [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from nginx configuration."
+  if nginx_configuration_uses_tls; then
+    INSTALL_MODE="public"
+    DOMAIN="$(extract_domain_from_nginx)"
+    [[ -n "${DOMAIN}" ]] || fail "Could not determine the configured hostname from nginx configuration."
+    CERTBOT_EMAIL="$(extract_certbot_email "${DOMAIN}")"
+  else
+    INSTALL_MODE="private"
+    DOMAIN=""
+    CERTBOT_EMAIL=""
+  fi
 
   INSTALL_MOBLIN="no"
   INSTALL_OBS="no"
@@ -466,7 +558,7 @@ infer_current_configuration() {
   fi
 
   validate_selected_projects
-  CERTBOT_EMAIL="$(extract_certbot_email "${DOMAIN}")"
+  validate_install_mode
   validate_distinct_endpoints
   sync_proxy_bases
 }
@@ -475,10 +567,20 @@ load_state() {
   if [[ -f "${STATE_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${STATE_FILE}"
+    INSTALL_MODE="${INSTALL_MODE:-}"
     DOMAIN="${DOMAIN:-}"
     CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
     INSTALL_MOBLIN="${INSTALL_MOBLIN:-}"
     INSTALL_OBS="${INSTALL_OBS:-}"
+    if [[ -z "${INSTALL_MODE}" ]]; then
+      if [[ -n "${DOMAIN}" ]]; then
+        INSTALL_MODE="public"
+      elif nginx_configuration_uses_tls; then
+        INSTALL_MODE="public"
+      else
+        INSTALL_MODE="private"
+      fi
+    fi
     if [[ -z "${INSTALL_MOBLIN}" ]]; then
       if [[ -f "${MOBLIN_SERVICE_FILE}" ]]; then
         INSTALL_MOBLIN="yes"
@@ -492,6 +594,11 @@ load_state() {
       else
         INSTALL_OBS="no"
       fi
+    fi
+    validate_install_mode
+    if is_private_mode; then
+      DOMAIN=""
+      CERTBOT_EMAIL=""
     fi
     MOBLIN_ENDPOINT="$(normalize_endpoint "${MOBLIN_ENDPOINT:-${DEFAULT_MOBLIN_ENDPOINT}}")"
     OBS_ENDPOINT="$(normalize_endpoint "${OBS_ENDPOINT:-${DEFAULT_OBS_ENDPOINT}}")"
@@ -507,20 +614,25 @@ load_state() {
 }
 
 existing_installation_detected() {
-  [[ -f "${STATE_FILE}" ]] || [[ -f "${MOBLIN_SERVICE_FILE}" ]] || [[ -f "${OBS_SERVICE_FILE}" ]] || [[ -f "${NGINX_SITE_FILE}" ]]
+  [[ -f "${STATE_FILE}" ]] || [[ -f "${MOBLIN_SERVICE_FILE}" ]] || [[ -f "${OBS_SERVICE_FILE}" ]] || [[ -f "${NGINX_SITE_FILE}" ]] || [[ -f "${NGINX_SITE_LINK}" ]]
 }
 
 collect_install_configuration() {
-  DOMAIN="$(prompt_required 'DNS name (for example relay.example.com): ')"
-  CERTBOT_EMAIL=""
-  read -r -p "Email address for Let's Encrypt (leave empty to register without email): " CERTBOT_EMAIL
-
   local moblin_input
   local obs_input
 
   INSTALL_MOBLIN="$(prompt_yes_default 'Install moblin-remote-control-relay?')"
   INSTALL_OBS="$(prompt_yes_default 'Install obs-remote-control-relay?')"
   validate_selected_projects
+
+  if is_public_mode; then
+    DOMAIN="$(prompt_required 'DNS name (for example relay.example.com): ')"
+    CERTBOT_EMAIL=""
+    read -r -p "Email address for Let's Encrypt (leave empty to register without email): " CERTBOT_EMAIL
+  else
+    DOMAIN=""
+    CERTBOT_EMAIL=""
+  fi
 
   if is_yes "${INSTALL_MOBLIN}"; then
     read -r -p "The original Moblin endpoint is ${DEFAULT_MOBLIN_ENDPOINT}. Press Enter to keep it, or enter a custom endpoint: " moblin_input
@@ -538,17 +650,28 @@ collect_install_configuration() {
 
   validate_distinct_endpoints
   sync_proxy_bases
+  validate_install_mode
 }
 
 install_dependencies() {
   ensure_commands "curl:curl" "sudo:sudo"
+  if is_public_mode; then
+    ensure_packages \
+      ca-certificates \
+      git \
+      golang-go \
+      nginx \
+      certbot \
+      python3-certbot-nginx \
+      nftables
+    return
+  fi
+
   ensure_packages \
     ca-certificates \
     git \
     golang-go \
     nginx \
-    certbot \
-    python3-certbot-nginx \
     nftables
 }
 
@@ -656,7 +779,55 @@ write_systemd_units() {
 configure_nginx() {
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 
-  cat >"${NGINX_SITE_FILE}" <<EOF
+  if is_private_mode; then
+    cat >"${NGINX_SITE_FILE}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+    root /var/www/html;
+    index index.nginx-debian.html index.html;
+EOF
+
+    if is_yes "${INSTALL_MOBLIN}"; then
+      cat >>"${NGINX_SITE_FILE}" <<EOF
+
+    location ${MOBLIN_ENDPOINT} {
+        proxy_pass http://127.0.0.1:${MOBLIN_PORT}/;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+        proxy_send_timeout 7d;
+        proxy_read_timeout 7d;
+    }
+EOF
+    fi
+
+    if is_yes "${INSTALL_OBS}"; then
+      cat >>"${NGINX_SITE_FILE}" <<EOF
+
+    location ${OBS_ENDPOINT} {
+        proxy_pass http://127.0.0.1:${OBS_PORT}/;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+        proxy_send_timeout 7d;
+        proxy_read_timeout 7d;
+    }
+EOF
+    fi
+
+    cat >>"${NGINX_SITE_FILE}" <<EOF
+}
+EOF
+  else
+    cat >"${NGINX_SITE_FILE}" <<EOF
 server {
     listen 80;
     listen [::]:80;
@@ -673,8 +844,8 @@ server {
 }
 EOF
 
-  if certificate_files_exist; then
-    cat >>"${NGINX_SITE_FILE}" <<EOF
+    if certificate_files_exist; then
+      cat >>"${NGINX_SITE_FILE}" <<EOF
 
 server {
     listen 443 ssl;
@@ -724,6 +895,7 @@ EOF
     cat >>"${NGINX_SITE_FILE}" <<EOF
 }
 EOF
+    fi
   fi
 
   ln -sfn "${NGINX_SITE_FILE}" "${NGINX_SITE_LINK}"
@@ -738,6 +910,12 @@ EOF
 }
 
 configure_firewall() {
+  local allowed_ports="22, 80, 443"
+
+  if is_private_mode; then
+    allowed_ports="22, 80"
+  fi
+
   cat >/etc/nftables.conf <<'EOF'
 #!/usr/sbin/nft -f
 flush ruleset
@@ -761,7 +939,7 @@ table inet filter {
             nd-neighbor-solicit,
             nd-neighbor-advert
         } accept
-        tcp dport { 22, 80, 443 } ct state new accept
+        tcp dport { PORTS_PLACEHOLDER } ct state new accept
     }
 
     chain forward {
@@ -776,11 +954,17 @@ table inet filter {
 }
 EOF
 
+  sed -i "s/PORTS_PLACEHOLDER/${allowed_ports}/" /etc/nftables.conf
+
   nft -f /etc/nftables.conf
   systemctl enable --now nftables
 }
 
 request_certificate() {
+  if is_private_mode; then
+    return
+  fi
+
   local certbot_args=(
     certbot
     certonly
@@ -870,13 +1054,57 @@ update_project() {
   printf '%s: %s -> %s\n' "${label}" "${before_revision}" "${after_revision}"
 }
 
+detect_access_host() {
+  local ip_address=""
+
+  if command_exists ip; then
+    ip_address="$(ip -4 route get 1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
+  fi
+
+  if [[ -z "${ip_address}" ]]; then
+    ip_address="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  if [[ -n "${ip_address}" ]]; then
+    printf '%s' "${ip_address}"
+    return
+  fi
+
+  printf 'SERVER_IP'
+}
+
+install_mode_label() {
+  if is_public_mode; then
+    printf 'public HTTPS'
+    return
+  fi
+
+  printf 'private HTTP-only'
+}
+
 show_urls() {
+  local base_host
+
+  if is_public_mode; then
+    base_host="${DOMAIN}"
+  else
+    base_host="$(detect_access_host)"
+  fi
+
   if is_yes "${INSTALL_MOBLIN}"; then
-    printf 'Moblin: https://%s%s\n' "${DOMAIN}" "${MOBLIN_ENDPOINT}"
+    if is_public_mode; then
+      printf 'Moblin: https://%s%s\n' "${base_host}" "${MOBLIN_ENDPOINT}"
+    else
+      printf 'Moblin: http://%s%s\n' "${base_host}" "${MOBLIN_ENDPOINT}"
+    fi
   fi
 
   if is_yes "${INSTALL_OBS}"; then
-    printf 'OBS:    https://%s%s\n' "${DOMAIN}" "${OBS_ENDPOINT}"
+    if is_public_mode; then
+      printf 'OBS:    https://%s%s\n' "${base_host}" "${OBS_ENDPOINT}"
+    else
+      printf 'OBS:    http://%s%s\n' "${base_host}" "${OBS_ENDPOINT}"
+    fi
   fi
 }
 
@@ -912,7 +1140,12 @@ show_current_configuration() {
   load_state
 
   printf '\nCurrent configuration\n'
-  printf 'Hostname:        %s\n' "${DOMAIN}"
+  printf 'Install mode:     %s\n' "$(install_mode_label)"
+  if is_public_mode; then
+    printf 'Hostname:         %s\n' "${DOMAIN}"
+  else
+    printf 'Access host:      %s\n' "$(detect_access_host)"
+  fi
   printf 'Moblin installed: %s\n' "${INSTALL_MOBLIN}"
   if is_yes "${INSTALL_MOBLIN}"; then
     printf 'Moblin endpoint:  %s\n' "${MOBLIN_ENDPOINT}"
@@ -923,10 +1156,12 @@ show_current_configuration() {
     printf 'OBS endpoint:     %s\n' "${OBS_ENDPOINT}"
     printf 'OBS service:      %s\n' "$(service_state "${OBS_SERVICE_NAME}.service")"
   fi
-  if [[ -n "${CERTBOT_EMAIL}" ]]; then
-    printf 'Certbot email:   %s\n' "${CERTBOT_EMAIL}"
-  else
-    printf 'Certbot email:   not stored\n'
+  if is_public_mode; then
+    if [[ -n "${CERTBOT_EMAIL}" ]]; then
+      printf 'Certbot email:    %s\n' "${CERTBOT_EMAIL}"
+    else
+      printf 'Certbot email:    not stored\n'
+    fi
   fi
   printf '\n'
   show_urls
@@ -958,6 +1193,10 @@ update_installed_projects() {
 change_hostname() {
   load_state
 
+  if is_private_mode; then
+    fail "Hostname changes are only available in public HTTPS mode."
+  fi
+
   local domain_input
   local email_input
   local original_domain="${DOMAIN}"
@@ -982,6 +1221,12 @@ change_hostname() {
 }
 
 renew_certificate_manually() {
+  load_state
+
+  if is_private_mode; then
+    fail "Certificate renewal is only available in public HTTPS mode."
+  fi
+
   log "Renewing certificates manually."
   certbot renew --non-interactive
 
@@ -1097,6 +1342,7 @@ uninstall_everything() {
 
 run_initial_installation() {
   confirm_destructive_warning
+  select_install_mode
   confirm_prerequisites
   collect_install_configuration
   upgrade_system_once
@@ -1134,8 +1380,9 @@ management_menu() {
   while true; do
     clear_screen
     print_banner
-    printf 'Existing installation detected for %s\n\n' "${DOMAIN}"
-    cat <<'EOF'
+    if is_public_mode; then
+      printf 'Existing installation detected for %s (%s)\n\n' "${DOMAIN}" "$(install_mode_label)"
+      cat <<'EOF'
 1. View current configuration
 2. Change hostname (and request a new certificate)
 3. Renew the certificate manually
@@ -1146,8 +1393,62 @@ management_menu() {
 0. Exit
 
 EOF
+    else
+      printf 'Existing installation detected (%s)\n\n' "$(install_mode_label)"
+      cat <<'EOF'
+1. View current configuration
+2. Update installed relay project(s)
+3. Change the Moblin endpoint
+4. Change the OBS endpoint
+5. Uninstall everything
+0. Exit
+
+EOF
+    fi
 
     read -r -p "Select an option: " selection
+
+    if is_public_mode; then
+      case "${selection}" in
+        1)
+          clear_screen
+          show_current_configuration
+          pause
+          ;;
+        2)
+          change_hostname
+          pause
+          ;;
+        3)
+          renew_certificate_manually
+          pause
+          ;;
+        4)
+          update_installed_projects
+          pause
+          ;;
+        5)
+          change_endpoint "moblin"
+          pause
+          ;;
+        6)
+          change_endpoint "obs"
+          pause
+          ;;
+        7)
+          uninstall_everything
+          break
+          ;;
+        0|"")
+          break
+          ;;
+        *)
+          warn "Invalid selection."
+          pause
+          ;;
+      esac
+      continue
+    fi
 
     case "${selection}" in
       1)
@@ -1156,26 +1457,18 @@ EOF
         pause
         ;;
       2)
-        change_hostname
-        pause
-        ;;
-      3)
-        renew_certificate_manually
-        pause
-        ;;
-      4)
         update_installed_projects
         pause
         ;;
-      5)
+      3)
         change_endpoint "moblin"
         pause
         ;;
-      6)
+      4)
         change_endpoint "obs"
         pause
         ;;
-      7)
+      5)
         uninstall_everything
         break
         ;;

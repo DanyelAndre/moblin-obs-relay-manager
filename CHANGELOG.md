@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- Added a choice between `public HTTPS` mode and `private HTTP-only` mode during initial installation.
+- Added a private mode that does not require a DNS name, Let's Encrypt, or port `443/tcp`.
+- Updated nginx, firewall, saved state, recovery logic, and the management menu to respect the selected installation mode.
+
 ## 1.2.0
 
 - Added a management option to update installed upstream relay projects.
